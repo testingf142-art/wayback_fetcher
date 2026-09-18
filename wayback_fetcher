@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 
-# ==========================================================
-# Tool: Wayback URL & Parameter Fetcher
-# Description: Fetch historical endpoints & parameters without API keys
-# ==========================================================
-
-# Colors for terminal output
+# Terminal colors
 RED='\033[1;31m'
 GREEN='\033[1;32m'
 BLUE='\033[1;34m'
@@ -16,6 +11,7 @@ RESET='\033[0m'
 # Default configurations
 INCLUDE_SUBS=false
 PARAMS_ONLY=false
+USE_GAU=false
 OUTPUT_FILE=""
 LIMIT=""
 
@@ -25,15 +21,16 @@ EXCLUDED_EXTS="png|jpg|jpeg|gif|svg|webp|ico|bmp|tiff|tif|psd|ai|eps|pdf|txt|xml
 usage() {
   echo -e "${YELLOW}Usage:${RESET} $0 [options] <domain | domains_file>"
   echo -e "\nOptions:"
-  echo -e "  -s, --subs         Include all subdomains (*.domain.com/*)"
-  echo -e "  -p, --params-only  Filter out static files & plain paths; keep ONLY endpoints with parameters (?)"
-  echo -e "  -l, --limit NUM    Limit results fetched from Wayback (e.g. 5000, prevents timeouts)"
+  echo -e "  -s, --subs         Include all subdomains"
+  echo -e "  -p, --params-only  Keep ONLY endpoints with query parameters (?) and exclude static assets"
+  echo -e "  -g, --gau          Use 'gau' (GetAllURLs) instead of native Wayback curl"
+  echo -e "  -l, --limit NUM    Limit results fetched from Wayback (e.g. 5000)"
   echo -e "  -o, --output FILE  Save clean results to an output file"
   echo -e "  -h, --help         Show this help message\n"
   echo -e "Examples:"
   echo -e "  $0 -p example.com"
-  echo -e "  $0 -s -p -l 10000 rumble.com"
-  echo -e "  $0 -s -p -o params.txt domains.txt"
+  echo -e "  $0 -g -s -p rumble.com"
+  echo -e "  $0 -g -p -o params.txt domains.txt"
   exit 1
 }
 
@@ -46,6 +43,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -p|--params-only)
       PARAMS_ONLY=true
+      shift
+      ;;
+    -g|--gau)
+      USE_GAU=true
       shift
       ;;
     -l|--limit)
@@ -75,66 +76,78 @@ if [[ -z "$TARGET" ]]; then
   usage
 fi
 
-fetch_wayback_urls() {
+# Check if gau is installed when -g flag is used
+if [ "$USE_GAU" = true ] && ! command -v gau &> /dev/null; then
+  echo -e "${RED}[!] Error: 'gau' is not installed or not in your PATH.${RESET}"
+  echo -e "${YELLOW}[i] Install it with: go install github.com/lc/gau/v2/cmd/gau@latest${RESET}"
+  exit 1
+fi
+
+fetch_urls() {
   local target_domain=$1
-  
-  # Strip protocol, path, ports, and spaces
   target_domain=$(echo "$target_domain" | sed -E 's|https?://||; s|/.*||; s|:[0-9]+||' | tr -d '[:space:]')
   
   if [[ -z "$target_domain" ]]; then
     return
   fi
 
-  local cdx_query
-  if [ "$INCLUDE_SUBS" = true ]; then
-    cdx_query="*.${target_domain}/*"
-    echo -e "\n${BLUE}[*] Fetching archive URLs for:${RESET} *.${target_domain}/* (including subdomains)"
+  local response=""
+
+  # --- Method 1: Using GAU ---
+  if [ "$USE_GAU" = true ]; then
+    echo -e "\n${BLUE}[*] Fetching URLs using GAU for:${RESET} $target_domain"
+    local gau_args=()
+    if [ "$INCLUDE_SUBS" = true ]; then
+      gau_args+=("--subs")
+    fi
+    response=$(gau "${gau_args[@]}" "$target_domain" 2>/dev/null)
+
+  # --- Method 2: Native Wayback CDX API ---
   else
-    cdx_query="${target_domain}/*"
-    echo -e "\n${BLUE}[*] Fetching archive URLs for:${RESET} ${target_domain}/* (exact domain only)"
-  fi
+    local cdx_query
+    if [ "$INCLUDE_SUBS" = true ]; then
+      cdx_query="*.${target_domain}/*"
+      echo -e "\n${BLUE}[*] Fetching archive URLs for:${RESET} *.${target_domain}/* (including subdomains)"
+    else
+      cdx_query="${target_domain}/*"
+      echo -e "\n${BLUE}[*] Fetching archive URLs for:${RESET} ${target_domain}/* (exact domain only)"
+    fi
 
-  # Build CDX URL over HTTPS
-  local cdx_url="https://web.archive.org/cdx/search/cdx?url=${cdx_query}&output=text&fl=original&collapse=urlkey"
-  
-  if [[ -n "$LIMIT" ]]; then
-    cdx_url="${cdx_url}&limit=${LIMIT}"
-  fi
+    local cdx_url="https://web.archive.org/cdx/search/cdx?url=${cdx_query}&output=text&fl=original&collapse=urlkey"
+    if [[ -n "$LIMIT" ]]; then
+      cdx_url="${cdx_url}&limit=${LIMIT}"
+    fi
 
-  # Request with browser user-agent and extended timeout
-  local response
-  response=$(curl -sL \
-    -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-    --connect-timeout 30 \
-    --max-time 180 \
-    "$cdx_url" 2>&1)
-  
-  local status=$?
-
-  if [[ $status -ne 0 ]]; then
-    echo -e "${RED}[!] Request failed (Exit code: $status). The Wayback server may be busy or the domain is too large.${RESET}"
-    echo -e "${YELLOW}[i] Tip: Try adding -l 10000 or query without -s.${RESET}"
-    return
+    response=$(curl -sL \
+      -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+      --connect-timeout 30 \
+      --max-time 180 \
+      "$cdx_url" 2>&1)
+    
+    local status=$?
+    if [[ $status -ne 0 ]]; then
+      echo -e "${RED}[!] Request failed (Exit code: $status). The Wayback server may be busy.${RESET}"
+      return
+    fi
   fi
 
   if [[ -z "$response" ]]; then
-    echo -e "${YELLOW}[-] No archived URLs found for: $target_domain${RESET}"
+    echo -e "${YELLOW}[-] No URLs found for: $target_domain${RESET}"
     return
   fi
 
-  # Keep valid HTTP/HTTPS URLs only
+  # Filter 1: Valid URLs only
   local cleaned_urls
   cleaned_urls=$(echo "$response" | grep -E '^https?://')
 
   if [[ -z "$cleaned_urls" ]]; then
-    echo -e "${YELLOW}[-] Server returned empty or non-URL response.${RESET}"
+    echo -e "${YELLOW}[-] No valid URLs returned.${RESET}"
     return
   fi
 
-  # Apply parameter-only & extension filtering if -p is passed
+  # Filter 2: Noise removal and Parameter filtering (-p)
   if [ "$PARAMS_ONLY" = true ]; then
     echo -e "${CYAN}[*] Filtering out static assets & plain paths...${RESET}"
-    
     cleaned_urls=$(echo "$cleaned_urls" \
       | grep -E '\?[^#[:space:]]+' \
       | grep -Evi "^https?://[^?#[:space:]]+\.(${EXCLUDED_EXTS})(\?.*)?$")
@@ -147,35 +160,34 @@ fetch_wayback_urls() {
 
   local count
   count=$(echo "$cleaned_urls" | sort -u | wc -l | tr -d ' ')
-  echo -e "${GREEN}[+] Found $count unique URLs for: $target_domain${RESET}"
+  echo -e "${GREEN}[+] Found $count unique target URLs for: $target_domain${RESET}"
 
   # Print results
   echo "$cleaned_urls" | sort -u
 
-  # Append to file if requested
+  # Save to file if specified
   if [[ -n "$OUTPUT_FILE" ]]; then
     echo "$cleaned_urls" | sort -u >> "$OUTPUT_FILE"
   fi
 }
 
-# Clear output file before starting
+# Reset output file if passed
 if [[ -n "$OUTPUT_FILE" ]]; then
   > "$OUTPUT_FILE"
 fi
 
-# Check if target is a file or a single domain
+# Execute against target file or domain
 if [[ -f "$TARGET" ]]; then
   echo -e "${CYAN}Reading domains from file: $TARGET${RESET}"
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-    fetch_wayback_urls "$line"
-    sleep 2
+    fetch_urls "$line"
+    sleep 1
   done < "$TARGET"
 else
-  fetch_wayback_urls "$TARGET"
+  fetch_urls "$TARGET"
 fi
 
-# Clean up output file
 if [[ -n "$OUTPUT_FILE" ]]; then
   sort -u -o "$OUTPUT_FILE" "$OUTPUT_FILE"
   echo -e "\n${GREEN}[✓] Results saved to: $OUTPUT_FILE${RESET}"
